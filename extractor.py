@@ -36,13 +36,93 @@ Output format (inside megaplay_stream.json):
 import argparse
 import base64
 import json
-import os
 import re
 import sys
 import time
 import urllib.request
 import urllib.error
 from pathlib import Path
+
+# ── proxy manager ─────────────────────────────────────────────────────────────
+
+class ProxyManager:
+    """
+    Rotates through a list of residential proxies.
+    On HTTP 429 / 503 the current proxy is marked bad and the next one is used.
+    All proxies share the same username / password.
+    """
+
+    _PROXIES: list[tuple[str, int]] = [
+        ("31.59.20.176",    6754),
+        ("31.56.127.193",   7684),
+        ("45.38.107.97",    6014),
+        ("198.105.121.200", 6462),
+        ("64.137.96.74",    6641),
+        ("198.23.243.226",  6361),
+        ("38.154.185.97",   6370),
+        ("84.247.60.125",   6095),
+        ("142.111.67.146",  5611),
+        ("191.96.254.138",  6185),
+    ]
+    _USER = "azsxgxoc"
+    _PASS = "7ydbjqx0h81p"
+
+    def __init__(self) -> None:
+        self._index = 0
+        self._bad: set[int] = set()          # indices of exhausted proxies
+        self._enabled = True
+
+    # ── public ────────────────────────────────────────────────────────────────
+
+    def disable(self) -> None:
+        """Turn off proxy usage (direct connection)."""
+        self._enabled = False
+
+    @property
+    def current(self) -> tuple[str, int] | None:
+        if not self._enabled:
+            return None
+        good = self._good_indices()
+        if not good:
+            return None
+        return self._PROXIES[self._index if self._index in good else good[0]]
+
+    def mark_bad_and_rotate(self) -> bool:
+        """
+        Mark current proxy as rate-limited and advance to the next good one.
+        Returns True if a new proxy is available, False if all are exhausted.
+        """
+        if not self._enabled:
+            return False
+        self._bad.add(self._index)
+        good = self._good_indices()
+        if not good:
+            print("[proxy] ⚠️  All proxies exhausted — continuing without proxy.")
+            self._enabled = False
+            return False
+        self._index = good[0]
+        host, port = self._PROXIES[self._index]
+        print(f"[proxy] → Switched to {host}:{port}")
+        return True
+
+    def build_opener(self) -> urllib.request.OpenerDirector:
+        """Return an opener that uses the current proxy (or direct if disabled)."""
+        proxy = self.current
+        if proxy is None:
+            return urllib.request.build_opener()
+        host, port = proxy
+        proxy_url = f"http://{self._USER}:{self._PASS}@{host}:{port}"
+        handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+        return urllib.request.build_opener(handler)
+
+    # ── private ───────────────────────────────────────────────────────────────
+
+    def _good_indices(self) -> list[int]:
+        return [i for i in range(len(self._PROXIES)) if i not in self._bad]
+
+
+# module-level singleton — shared by extractor + batch
+proxy_manager = ProxyManager()
 
 # ── constants ────────────────────────────────────────────────────────────────
 
@@ -65,16 +145,28 @@ MAX_FILE_BYTES   = 20 * 1024 * 1024   # 20 MB
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def get_bytes(url: str, retries: int = MAX_RETRIES) -> bytes:
-    """Fetch raw bytes from *url* with simple retry logic."""
+    """
+    Fetch raw bytes from *url*.
+
+    On HTTP 429 / 503 the current proxy is marked bad and the next proxy in
+    the rotation is tried immediately (up to MAX_RETRIES total attempts).
+    Other transient errors use the same proxy with an exponential back-off.
+    """
     for attempt in range(1, retries + 1):
+        opener = proxy_manager.build_opener()
+        req = urllib.request.Request(url, headers=HEADERS)
         try:
-            req = urllib.request.Request(url, headers=HEADERS)
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with opener.open(req, timeout=20) as resp:
                 return resp.read()
         except urllib.error.HTTPError as exc:
-            if exc.code in (429, 503) and attempt < retries:
-                print(f"  [warn] HTTP {exc.code} on {url!r}, retry {attempt}/{retries}…")
-                time.sleep(RETRY_DELAY * attempt)
+            if exc.code in (429, 503):
+                proxy = proxy_manager.current
+                tag = f"{proxy[0]}:{proxy[1]}" if proxy else "direct"
+                print(f"  [warn] HTTP {exc.code} via {tag} — rotating proxy…")
+                rotated = proxy_manager.mark_bad_and_rotate()
+                if not rotated and attempt >= retries:
+                    raise
+                # no sleep: try next proxy immediately
             else:
                 raise
         except Exception as exc:
