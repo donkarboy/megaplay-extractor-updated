@@ -1,0 +1,107 @@
+name: Extract M3U8 Streams
+
+on:
+  # ── manual trigger ────────────────────────────────────────────────────────
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Extraction mode"
+        required: true
+        type: choice
+        options:
+          - single-mal        # extract one MAL ID (extractor.py)
+          - catalog-batch     # extract from anisnatch catalog (batch.py --catalog)
+          - config-batch      # extract from batch_config.json (batch.py --config)
+        default: single-mal
+
+      mal_id:
+        description: "MAL ID [single-mal only]"
+        required: false
+        type: string
+        default: ""
+
+      episode:
+        description: |
+          Episode(s) to fetch [single-mal only — leave blank for ALL].
+          Formats: "5"  "1-12"  "1,3,7"  "1,5-8,10"
+        required: false
+        type: string
+        default: ""
+
+      serial:
+        description: |
+          Serial range from the anisnatch catalog [catalog-batch only].
+          Formats: "1-100"  "45-60"  "1,5,10-20"  "all"
+        required: false
+        type: string
+        default: ""
+
+  # ── scheduled refresh (uncomment to enable) ───────────────────────────────
+  # schedule:
+  #   - cron: "0 3 * * *"   # 03:00 UTC every day
+
+jobs:
+  extract:
+    name: "[${{ inputs.mode }}] MAL ${{ inputs.mal_id || 'batch' }}"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run extractor
+        run: |
+          MODE="${{ inputs.mode }}"
+
+          if [ "$MODE" = "single-mal" ]; then
+            if [ -z "${{ inputs.mal_id }}" ]; then
+              echo "ERROR: mal_id is required for single-mal mode."
+              exit 1
+            fi
+            ARGS="--mal-id ${{ inputs.mal_id }}"
+            if [ -n "${{ inputs.episode }}" ]; then
+              ARGS="$ARGS --episode ${{ inputs.episode }}"
+            fi
+            echo "Running: python extractor.py $ARGS"
+            python extractor.py $ARGS
+
+          elif [ "$MODE" = "catalog-batch" ]; then
+            ARGS="--catalog"
+            if [ -n "${{ inputs.serial }}" ]; then
+              ARGS="$ARGS --serial ${{ inputs.serial }}"
+            else
+              echo "ERROR: --serial is required for catalog-batch mode in CI."
+              exit 1
+            fi
+            echo "Running: python batch.py $ARGS"
+            python batch.py $ARGS
+
+          elif [ "$MODE" = "config-batch" ]; then
+            echo "Running: python batch.py --config batch_config.json"
+            python batch.py --config batch_config.json
+
+          else
+            echo "ERROR: Unknown mode: $MODE"
+            exit 1
+          fi
+
+      - name: Commit and push JSON
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add streams/
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore: update streams/megaplay_stream.json [${{ inputs.mode }}]"
+            git push
+          fi
