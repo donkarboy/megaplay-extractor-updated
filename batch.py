@@ -28,6 +28,9 @@ Usage:
     # YAML / manual config mode:
     python batch.py --config batch_config.json
     python batch.py --config my_list.json
+
+    # Disable residential proxies (direct connection):
+    python batch.py --no-proxy --catalog --serial 1-10
 """
 
 import argparse
@@ -46,6 +49,7 @@ from extractor import (
     load_master_file,
     save_master_file,
     parse_episode_arg,
+    proxy_manager,          # ← shared proxy rotation singleton
 )
 
 # ── constants ────────────────────────────────────────────────────────────────
@@ -63,7 +67,8 @@ def fetch_catalog() -> list[dict]:
     """Download and parse the anisnatch catalog JSON."""
     print(f"[catalog] Fetching from:\n  {CATALOG_URL}\n")
     try:
-        with urllib.request.urlopen(CATALOG_URL, timeout=30) as resp:
+        opener = proxy_manager.build_opener()
+        with opener.open(CATALOG_URL, timeout=30) as resp:
             data = json.loads(resp.read())
     except Exception as exc:
         print(f"[error] Could not fetch catalog: {exc}")
@@ -176,6 +181,13 @@ def run_catalog_batch(serial_list: list[int], catalog: list[dict]) -> None:
     print(f"\nProcessing {len(entries_to_process)} anime title(s).\n")
     print(f"Output → streams/{OUTPUT_STEM}.json  (shared, 20 MB max per file)\n")
 
+    # ── print active proxy ───────────────────────────────────────────────────
+    proxy = proxy_manager.current
+    if proxy:
+        print(f"[proxy] Starting with {proxy[0]}:{proxy[1]}\n")
+    else:
+        print("[proxy] Running without proxy (direct connection).\n")
+
     STREAMS_DIR.mkdir(parents=True, exist_ok=True)
     master = load_master_file()
     total_processed = 0
@@ -242,6 +254,13 @@ def run_config_batch(config_path: Path) -> None:
 
     print(f"[config] Loaded {len(config)} entries from {config_path}\n")
     print(f"Output → streams/{OUTPUT_STEM}.json  (shared, 20 MB max per file)\n")
+
+    # ── print active proxy ───────────────────────────────────────────────────
+    proxy = proxy_manager.current
+    if proxy:
+        print(f"[proxy] Starting with {proxy[0]}:{proxy[1]}\n")
+    else:
+        print("[proxy] Running without proxy (direct connection).\n")
 
     STREAMS_DIR.mkdir(parents=True, exist_ok=True)
     master = load_master_file()
@@ -310,6 +329,7 @@ def main():
             "  Default (no flags) : catalog mode — interactive serial range prompt\n"
             "  --catalog          : catalog mode — use with --serial for non-interactive\n"
             "  --config FILE      : manual/YAML mode — reads a local JSON config\n"
+            "  --no-proxy         : skip residential proxies, use direct connection\n"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=__doc__,
@@ -337,7 +357,18 @@ def main():
         default=None,
         help="Path to a local JSON config file (manual/YAML mode).",
     )
+    parser.add_argument(
+        "--no-proxy",
+        action="store_true",
+        default=False,
+        help="Disable residential proxy rotation and use a direct connection.",
+    )
     args = parser.parse_args()
+
+    # ── proxy setup ───────────────────────────────────────────────────────────
+    if args.no_proxy:
+        proxy_manager.disable()
+        print("[proxy] Residential proxies disabled — using direct connection.\n")
 
     # ── determine mode ────────────────────────────────────────────────────────
     if args.config:
